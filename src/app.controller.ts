@@ -9,4 +9,9 @@ export class AppController {
   getHello(): string {
     return this.appService.getHello();
   }
+
+  @Get('bikes')
+  async getBikes(lng?: number, lat?: number) {
+    return await this.appService.getBikes(127.2661, 36.5152);
+  }
 }
