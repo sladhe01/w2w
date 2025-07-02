@@ -5,8 +5,12 @@ import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import {
   BikePathOutput,
+  BikeSection,
+  CoordToAddressOutput,
   PathInput,
   PubPathOutput,
+  SearchCoordByAddressOutput,
+  Step,
   WalkPathOutput,
 } from './dto/path.dto';
 
@@ -49,7 +53,9 @@ export class PathService {
     }
   }
 
-  private async searchCoordByAddress(query: string) {
+  private async searchCoordByAddress(
+    query: string,
+  ): Promise<SearchCoordByAddressOutput> {
     try {
       const response = await firstValueFrom(
         this.httpService.get(`http://dapi.kakao.com/v2/local/search.json`, {
@@ -63,6 +69,32 @@ export class PathService {
       else throw new InternalServerErrorException();
     } catch {
       throw new InternalServerErrorException(`Cannot get coordination`);
+    }
+  }
+
+  private async coordToAddress(
+    x: string,
+    y: string,
+    input_coord: string,
+  ): Promise<CoordToAddressOutput> {
+    try {
+      const response = await firstValueFrom(
+        this.httpService.get(
+          `http://dapi.kakao.com/v2/local/geo/coord2address.json`,
+          {
+            headers: {
+              Authorization: `KakaoAK f5e99b0d96edb86c08b31d262770f146`,
+            },
+            params: { x: `${x}`, y: `${y}`, input_coord: `${input_coord}` },
+          },
+        ),
+      );
+      if (response.status === 200) return response.data;
+      else throw new InternalServerErrorException();
+    } catch {
+      throw new InternalServerErrorException(
+        `Cannot get address by coordination`,
+      );
     }
   }
 
@@ -104,6 +136,7 @@ export class PathService {
     }
   }
 
+  //searchCoord 함수로 다른 변수도 넣을 수 있을듯
   private async findPubPath({
     sX,
     sY,
@@ -196,6 +229,51 @@ export class PathService {
     }
   }
 
+  //자전거 길찾기 정보를 일반 길찾기 정보로 변환하는 함수
+  private async bikeSectionToPubStep(section: BikeSection): Promise<Step> {
+    try {
+      let step: Step;
+      const startPoint = await this.coordToAddress(
+        `${section.guideList[0].x}`,
+        `${section.guideList[0]}.y`,
+        'WCONGNAMUL',
+      );
+      const startPointName = startPoint.documents[0].address.address_name;
+      const destination = await this.coordToAddress(
+        `${section.guideList[section.guideList.length - 1].x}`,
+        `${section.guideList[section.guideList.length - 1].y}`,
+        'WCONGNAMUL',
+      );
+      const destinationName = destination.documents[0].address.address_name;
+      step.information = `${destinationName}까지 자전거로 이동`;
+      step.type = 'WALKING';
+      step.action = 'MOVE';
+      step.actionName = '이동';
+      step.distance = {
+        value: section.length,
+        text: `${section.length}m`,
+        html: `<b>${section.length}</b>m`,
+      };
+      step.time = {
+        value: section.time,
+        text: `${Math.round(section.time)}분`,
+        html: `<b>${Math.round(section.time)}</b>분`,
+      };
+      step.startLocation = {
+        name: startPointName,
+        x: section.guideList[0].x,
+        y: section.guideList[0].y,
+      };
+      //type이 언제 붙는지 좀 알아보고 마저하자
+      step.endLocation = {};
+
+      return {};
+    } catch {}
+  }
+
+  //도보 길찾기 정보를 일반 길찾기 정보로 변환하는 함수
+  private async walkGuidesToPubSteps() {}
+
   //원래 pathOutput을 가지고 step에서 뭐 하나 빼고 summary 정리하고 이런식으로 하자
   //만약 구하는 값이 없는경우는 또 어떻게 처리하냐...
   async findMyBikePaths(
@@ -252,7 +330,23 @@ export class PathService {
                           eY: beY,
                         })
                       ).directions[1];
+                      firstStep.information = '';
                       //기존 route를 이제 변경할 차례인가??
+                    } else {
+                      firstStep.information =
+                        firstStep.information.split('까지')[0] +
+                        ' 자전거로 이동';
+                      firstStep.type = 'BIKE';
+                      firstStep.distance = {
+                        value: direction.length,
+                        text: `${direction.length}m`,
+                        html: `<b>${direction.length}</b>m`,
+                      };
+                      firstStep.time = {
+                        value: direction.time,
+                        text: `${Math.floor(direction.time)}분`,
+                        html: `<b>${Math.floor(direction.time)}</b>분`,
+                      };
                     }
                   }),
                 );
