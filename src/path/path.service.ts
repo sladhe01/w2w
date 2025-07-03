@@ -2,7 +2,7 @@ import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import { CreatePathDto } from './dto/create-path.dto';
 import { UpdatePathDto } from './dto/update-path.dto';
 import { HttpService } from '@nestjs/axios';
-import { firstValueFrom } from 'rxjs';
+import { first, firstValueFrom, last } from 'rxjs';
 import {
   BikePathOutput,
   BikeSection,
@@ -12,6 +12,7 @@ import {
   SearchCoordByAddressOutput,
   Step,
   WalkPathOutput,
+  WalkSection,
 } from './dto/path.dto';
 
 // .env 처리 필요
@@ -160,12 +161,17 @@ export class PathService {
         const endIdx = response.data.lastIndexOf(')');
         const jsonStr = response.data.slice(startIdx + 1, endIdx);
         const data = JSON.parse(jsonStr);
+        if (data.in_local_status === 'TOO_NEAR_POINTS')
+          throw new Error('TOO NEAR POINTS');
         return data;
       } else throw new InternalServerErrorException();
-    } catch {
-      throw new InternalServerErrorException(
-        `Cannot find public transportation paths`,
-      );
+    } catch (error) {
+      if (error.message === 'TOO NEAR POINTS') throw error;
+      else {
+        throw new InternalServerErrorException(
+          `Cannot find public transportation paths`,
+        );
+      }
     }
   }
 
@@ -229,56 +235,132 @@ export class PathService {
     }
   }
 
-  //자전거 길찾기 정보를 일반 길찾기 정보로 변환하는 함수
-  private async bikeSectionToPubStep(section: BikeSection): Promise<Step> {
-    try {
-      let step: Step;
-      const startPoint = await this.coordToAddress(
-        `${section.guideList[0].x}`,
-        `${section.guideList[0]}.y`,
-        'WCONGNAMUL',
-      );
-      const startPointName = startPoint.documents[0].address.address_name;
-      const destination = await this.coordToAddress(
-        `${section.guideList[section.guideList.length - 1].x}`,
-        `${section.guideList[section.guideList.length - 1].y}`,
-        'WCONGNAMUL',
-      );
-      const destinationName = destination.documents[0].address.address_name;
-      step.information = `${destinationName}까지 자전거로 이동`;
-      step.type = 'WALKING';
-      step.action = 'MOVE';
-      step.actionName = '이동';
-      step.distance = {
-        value: section.length,
-        text: `${section.length}m`,
-        html: `<b>${section.length}</b>m`,
-      };
-      step.time = {
-        value: section.time,
-        text: `${Math.round(section.time)}분`,
-        html: `<b>${Math.round(section.time)}</b>분`,
-      };
-      step.startLocation = {
-        name: startPointName,
-        x: section.guideList[0].x,
-        y: section.guideList[0].y,
-      };
-      //type이 언제 붙는지 좀 알아보고 마저하자
-      step.endLocation = {};
+  //도보 길찾기 정보를 일반 길찾기 정보로 변환하는 함수 어울링 이용시 사용될 예정
+  private async walkGuidesToPubSteps() {}
 
-      return {};
+  //치환할 steps를 bike 길찾기경로 찾은 후 step 형식으로 변환하여 반환
+  private async convertStepsTobikeStep(
+    steps: Step[],
+    mode: 'BIKE_ONLY' | 'SHORTEST' | 'ACCESSIBLE',
+  ): Promise<Step[]> {
+    try {
+      let bikeStep: Step;
+      let blurredStep: Step | undefined;
+      if (steps.length === 1) {
+        const stepToConvert = steps[0];
+        // 지하철은 아직 연구가 안되서 추가 안함
+        if (stepToConvert.type === 'WALKING' || stepToConvert.type === 'BUS') {
+          const startPoint = {
+            x: stepToConvert.startLocation.x,
+            y: stepToConvert.startLocation.y,
+          };
+          const endPoint = {
+            x: stepToConvert.endLocation.x,
+            y: stepToConvert.endLocation.y,
+          };
+          const bikePaths = await this.findBikePath({
+            sX: startPoint.x,
+            sY: startPoint.y,
+            eX: endPoint.x,
+            eY: endPoint.y,
+          });
+          //자전거도로 우선, 최단, 편안한 길에 따른 모드 변경
+          let bikeSection: BikeSection;
+          switch (mode) {
+            case 'BIKE_ONLY':
+              bikeSection = bikePaths.directions[0].sections[0];
+              break;
+            case 'SHORTEST':
+              bikeSection = bikePaths.directions[1].sections[0];
+              break;
+            case 'ACCESSIBLE':
+              bikeSection = bikePaths.directions[2].sections[0];
+          }
+          const bikeGuides = bikeSection.guideList;
+          bikeStep.information =
+            stepToConvert.information.split('까지') + ' 자전거로 이동';
+          if (
+            stepToConvert.type === 'WALKING' &&
+            stepToConvert.time.value <= 360
+          )
+            bikeStep.information += ' (도보 이동 추천)';
+          if (stepToConvert.type === 'BUS' && stepToConvert.time.value >= 600)
+            bikeStep.information += ' (버스 이동 추천)';
+          bikeStep.type = 'BIKE';
+          bikeStep.action = 'MOVE';
+          bikeStep.actionName = '이동';
+          bikeStep.distance = {
+            value: bikeSection.length,
+            text: `${bikeSection.length}m`,
+            html: `<b>${bikeSection.length}</b>m`,
+          };
+          bikeStep.time = {
+            value: bikeSection.time,
+            text: `${Math.round(bikeSection.time)}분`,
+            html: `<b>${Math.round(bikeSection.time)}</b>분`,
+          };
+          bikeStep.startLocation = {
+            name: stepToConvert.startLocation.name,
+            x: stepToConvert.startLocation.x,
+            y: stepToConvert.startLocation.y,
+          };
+          //원래 종착지가 버스 정류장인데 교통섬과 같은 경우 마지막 구간 blur로 나타내야함
+          const lastGuide = bikeGuides[bikeGuides.length - 1];
+          if (
+            stepToConvert.endLocation.type === 'BUS' &&
+            (stepToConvert.endLocation.x !== lastGuide.x ||
+              stepToConvert.endLocation.y !== lastGuide.y)
+          ) {
+            blurredStep = {
+              type: 'BLUR',
+              polylineStart: { x: lastGuide.x, y: lastGuide.y },
+              polylineEnd: {
+                x: stepToConvert.endLocation.x,
+                y: stepToConvert.endLocation.y,
+              },
+              polyline: `${Number(lastGuide.x)}|${Number(lastGuide.y)}|${Number(stepToConvert.endLocation.x)}|${Number(stepToConvert.endLocation.y)}`,
+            };
+          } else {
+            bikeStep.endLocation = stepToConvert.endLocation;
+          }
+          bikeStep.polyline = '';
+          await Promise.all(
+            bikeGuides.map((guide, idx) => {
+              if (idx === 0) {
+                bikeStep.polyline += guide.link.points
+                  .split('|')
+                  .map((points) => {
+                    const [x, y] = points.split(',');
+                    return `${Number(x)}|${Number(y)}`;
+                  })
+                  .join('|');
+              } else {
+                bikeStep.polyline += guide.link.points
+                  .split('|')
+                  .map((points, pointsIdx) => {
+                    if (pointsIdx !== 0) {
+                      const [x, y] = points.split(',');
+                      return `${Number(x)}|${Number(y)}`;
+                    }
+                  })
+                  .join('|');
+              }
+            }),
+          );
+        }
+      } else if (steps.length === 2) {
+      }
+      if (blurredStep) return [bikeStep, blurredStep];
+      else return [bikeStep];
     } catch {}
   }
-
-  //도보 길찾기 정보를 일반 길찾기 정보로 변환하는 함수
-  private async walkGuidesToPubSteps() {}
 
   //원래 pathOutput을 가지고 step에서 뭐 하나 빼고 summary 정리하고 이런식으로 하자
   //만약 구하는 값이 없는경우는 또 어떻게 처리하냐...
   async findMyBikePaths(
     isBikeAtStart: Boolean,
     isBikeAtEnd: Boolean,
+    mode: 'BIKE_ONLY' | 'SHORTEST' | 'ACCESSIBLE',
     sLng: number,
     sLat: number,
     eLng: number,
@@ -292,10 +374,12 @@ export class PathService {
       if (isBikeAtStart) {
         await Promise.all(
           routes.map(async (route) => {
+            const departureStep = route.steps[0];
             const firstStep = route.steps[1];
             if (!firstStep)
               throw new InternalServerErrorException('There is no first step');
             const firstStepTime = firstStep.time.value;
+            //도보, 버스 순서의 경우 도보를 자전거로 변경
             if (firstStep.type === 'WALKING') {
               const secondStep = route.steps[2];
               if (!secondStep)
@@ -303,58 +387,42 @@ export class PathService {
                   'There is no second step',
                 );
               const secondStepTime = secondStep.time.value;
-              if (secondStep.type !== 'BUS' && firstStepTime > 360) {
-                //치환o
-                const bsX = firstStep.startLocation.x;
-                const bsY = firstStep.startLocation.y;
-                const beX = firstStep.endLocation.x;
-                const beY = firstStep.endLocation.y;
-                const bikePaths = await this.findBikePath({
-                  sX: bsX,
-                  sY: bsY,
-                  eX: beX,
-                  eY: beY,
-                });
-                await Promise.all(
-                  bikePaths.directions.map(async (direction) => {
-                    const lastSection =
-                      direction.sections[direction.sections.length - 1];
-                    const lastGuide =
-                      lastSection.guideList[lastSection.guideList.length - 1];
-                    if (beX !== lastGuide.x || beY !== lastGuide.y) {
-                      const intermediateWalkPath = (
-                        await this.findWalkPath({
-                          sX: lastGuide.x,
-                          sY: lastGuide.y,
-                          eX: beX,
-                          eY: beY,
-                        })
-                      ).directions[1];
-                      firstStep.information = '';
-                      //기존 route를 이제 변경할 차례인가??
-                    } else {
-                      firstStep.information =
-                        firstStep.information.split('까지')[0] +
-                        ' 자전거로 이동';
-                      firstStep.type = 'BIKE';
-                      firstStep.distance = {
-                        value: direction.length,
-                        text: `${direction.length}m`,
-                        html: `<b>${direction.length}</b>m`,
-                      };
-                      firstStep.time = {
-                        value: direction.time,
-                        text: `${Math.floor(direction.time)}분`,
-                        html: `<b>${Math.floor(direction.time)}</b>분`,
-                      };
-                    }
-                  }),
+              if (secondStep.type !== 'BUS')
+                throw new Error('DO NOT SUPPORT THIS TYPE SERVICE');
+              // 이 밑으로는 다시 작성해야함
+              let convertedSteps: Step[];
+              if (secondStepTime > 540) {
+                convertedSteps = await this.convertStepsTobikeStep(
+                  [firstStep],
+                  mode,
                 );
-              } else if (secondStep.type === 'BUS' && secondStepTime <= 600) {
-                //치환o
-              } else return;
+                route.steps.splice(1, 1, ...convertedSteps);
+              }
+              // summary 같은거 더 정리해야함
+              return route;
             } else if (firstStep.type === 'BUS' && firstStepTime <= 600) {
               //치환o 위에서 사용한 알고리즘 private func로 만들어서 그대로 쓰자 생각해보니 조금 다를 수 있으니 개별 알고리즘 짜야할 듯
+            }
+            // 이 위로 다시 작성해야 함
+            /* 지나가지 못하는 곳에서 이동이 가능한 곳까지 폴리라인을 그리기 위함이니 나중에
+            프론트에서 type이 Blur면 좌측에는 표시안하고 지도에만 blurred polyline 표시 해주면 됨*/
+            if (
+              departureStep.startLocation.x !== firstStep.polylineStart.x ||
+              departureStep.startLocation.y !== firstStep.polylineStart.y
+            ) {
+              const blurredStep: Step = {
+                type: 'BLUR',
+                polylineStart: {
+                  x: departureStep.startLocation.x,
+                  y: departureStep.startLocation.y,
+                },
+                polylineEnd: {
+                  x: firstStep.polylineStart.x,
+                  y: firstStep.polylineStart.y,
+                },
+                polyline: `${Number(departureStep.polylineStart.x)}|${Number(departureStep.polylineStart.y)}|${Number(departureStep.polylineEnd.x)}|${Number(departureStep.polylineEnd.y)}}`,
+              };
+              route.steps.splice(1, 0, blurredStep);
             }
           }),
         );
@@ -362,8 +430,11 @@ export class PathService {
     } catch (error) {
       if (
         error.message === 'There is no first step' ||
-        error.message === 'There is no second step'
+        error.message === 'There is no second step' ||
+        error.message === 'TOO NEAR POINTS'
       )
+        throw error(`${error.message} SO YOU DO NOT NEED TO USE THIS SERVICE`);
+      else if (error.message === 'DO NOT SUPPORT THIS TYPE SERVICE')
         throw error;
       else throw new InternalServerErrorException('Cannot find my bike paths');
     }
