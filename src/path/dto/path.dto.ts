@@ -105,11 +105,11 @@ export class PubStep {
 export class PubPolyline {
   pts: string;
   type: string;
-  //버스에서만 사용됨
+  //버스 정류장에만 사용됨
   node_s?: {
     id: string;
   };
-  //버스에서만 사용됨
+  //버스 정류장에만 사용됨
   node_e?: {
     id: string;
   };
@@ -338,6 +338,7 @@ export class FindMyBikePathsInput {
   sPt: Point;
   ePt: Point;
   start_at: string;
+  bike_option: string;
 }
 
 export class FindMyBikePathsOutput {
@@ -405,7 +406,7 @@ export class WtwBike {
   time: number;
   length: number;
   //BikeResultStep에서 필요한 속성만 넣자
-  steps: BikeResultStep[];
+  steps: WtwBikeStep[];
   facilities: {
     bridge: number;
     underground: number;
@@ -422,6 +423,24 @@ export class WtwBike {
   };
 }
 
+export class WtwBikeStep {
+  pt_type?: string;
+  name?: string;
+  lon: number;
+  lat: number;
+  distance: number;
+  icon_guide?: string;
+  icon_road?: string;
+  guidement?: string;
+  time: number;
+  lane_count: number;
+  rotation_angle: number;
+  crossroad_rotation?: string;
+  crossroad_rotation_clock: number;
+  crossroad_rotation_order: number;
+  guide_need: boolean;
+}
+
 export class WtwPolyline {
   pts: string;
   type: string;
@@ -434,13 +453,6 @@ export class WtwPolyline {
   high?: string;
 }
 
-export class FilterDuplicatedRouteInput {
-  routes: PubRoute[];
-}
-
-export class FilterDuplicatedRouteOutput {
-  routes: PubRoute[];
-}
 // 이 위로 유효
 
 export class PathInput {

@@ -7,12 +7,11 @@ import {
   BikePathOutput,
   BikeSection,
   CoordToAddressOutput,
-  FilterDuplicatedRouteInput,
-  FilterDuplicatedRouteOutput,
   FindBikePathInput,
   FindBikePathOutput,
   FindMyBikePathsInput,
   FindPubPathInput,
+  FindPubPathOutput,
   FindWalkPathInput,
   FindWalkPathOutput,
   PathInput,
@@ -23,6 +22,8 @@ import {
   Step,
   WalkPathOutput,
   WalkSection,
+  WtwPolyline,
+  WtwRoute,
 } from './dto/path.dto';
 
 // .env 처리 필요
@@ -187,7 +188,11 @@ export class PathService {
   //     }
   //   }
 
-  private async findPubPath({ sPt, ePt, start_at }: FindPubPathInput) {
+  private async findPubPath({
+    sPt,
+    ePt,
+    start_at,
+  }: FindPubPathInput): Promise<FindPubPathOutput> {
     try {
       const response = await firstValueFrom(
         this.httpService.get(
@@ -521,9 +526,7 @@ export class PathService {
   //자전거 단계 하나하나는 전체 요약에선 하나의 단계로 표현되고 클릭했을 때 드롭다운형식으로 구체적으로 나오도록 할 것
   async transBikeResultToWtwStep() {}
 
-  async filterDuplicatedRoute({
-    routes,
-  }: FilterDuplicatedRouteInput): Promise<FilterDuplicatedRouteOutput> {
+  async filterDuplicatedRoute(routes: PubRoute[]): Promise<PubRoute[]> {
     /*
     만약 205번타고 B5 타기와 도보+B5 타기가 있으면 자전거 치환후에 같아 지는데 이를 어떻게 필터링 할까
     -> 우선 치환 전에 rotue.transfer가 0인 route의 steps에서 step.type==="BUS"인 것의 step.node.type==="BUSSTOP"의 route.step.node.id(예시)와 route.rank를 하나의 Array에 모아둔다.
@@ -553,10 +556,19 @@ export class PathService {
       }
     }
     // console.log(routes.length, filteredRoutes.length);
-    return { routes: filteredRoutes };
+    // filteredRoutes.forEach((r) => {
+    //   const stepsType = r.steps.map((s) => s.type);
+    //   console.log(r.steps.length, stepsType);
+    // });
+    return filteredRoutes;
   }
 
-  async findMyBikePaths({ sPt, ePt, start_at }: FindMyBikePathsInput) {
+  async findMyBikePaths({
+    sPt,
+    ePt,
+    start_at,
+    bike_option,
+  }: FindMyBikePathsInput) {
     /*
     출발지, 목적지, 자전거 탑승지 인자로 받는다
     일반 대중교통 길찾기로 경로 전달 받은 후 치환한다.
@@ -587,8 +599,91 @@ export class PathService {
     # 자전거를 탑승하는 곳이 정해져 있으니 일반 길찾기로 목적지를 자전거 탑승지로 지정하면 되니까 그닥 효용성이 없어보임 그래서 버스 정류장까지 탑승하고 가는 경우만 안내한다고 미리 고지 해야할 듯
     */
     try {
-      const pubPath = this.findPubPath({ sPt, ePt, start_at });
+      const pubPath = await this.findPubPath({ sPt, ePt, start_at });
+      const filteredRoutes = await this.filterDuplicatedRoute(
+        pubPath.incity.routes,
+      );
+      filteredRoutes.forEach((route) => console.log(route.steps.length));
     } catch (e) {}
+  }
+
+  // 반환 타입 써주기 PubRoute
+  async convertMybikeRoute({
+    route,
+    bike_option,
+  }: {
+    route: PubRoute;
+    bike_option: string;
+  }) {
+    try {
+      //1번 경우의 수
+      if (
+        route.steps[1].type === 'WALKING' &&
+        route.steps[2].type === 'BUS' &&
+        route.steps[3].type === 'GETOFF' &&
+        route.steps[4].type !== 'BUS'
+      ) {
+        const pt = {
+          lon: route.steps[1].node.lon,
+          lat: route.steps[1].node.lat,
+        };
+        const ep = {
+          lon: route.steps[2].node.lon,
+          lat: route.steps[2].node.lat,
+        };
+        const bikePath = (await this.findBikePath({ pt, ep })).results.find(
+          (path) => path.options[0] === bike_option,
+        );
+        const stepOneLastPolylineIndex = route.steps[1].polylines.length - 1;
+        const nodeS = route.steps[1].polylines[0].node_s;
+        const nodeE = route.steps[1].polylines[stepOneLastPolylineIndex].node_e;
+        const polylines = bikePath.polylines.map((line: WtwPolyline, i) => {
+          if (line.high) {
+            Reflect.deleteProperty(line, 'high');
+          }
+          if (i === 0) {
+            if (nodeS) line.node_s = nodeS;
+          }
+          if (i === bikePath.polylines.length - 1) {
+            if (nodeE) line.node_e = nodeE;
+          }
+          return line;
+        });
+        const bike = {
+          options: bikePath.options,
+          time: bikePath.time,
+          length: bikePath.length,
+          steps: bikePath.steps.map((step) => {
+            Reflect.deleteProperty(step, 'roadview');
+            return step;
+          }),
+          facilities: bikePath.facilities,
+        };
+        const wtwBikeStep = {
+          type: 'BIKE',
+          node: route.steps[1].node,
+          time: {
+            total: bikePath.time,
+            moving: bikePath.time,
+          },
+          bike,
+          polylines,
+        };
+        //route 시간,거리 다시 합산
+        route.time.total =
+          route.time.total - route.steps[1].time.total + wtwBikeStep.time.total;
+        route.distance.total =
+          route.distance.total -
+          route.steps[1].walk.distance +
+          wtwBikeStep.bike.length;
+        //steps에서 walk빼고 새로운 wtwBikeStep 넣고
+        route.steps.splice(1, 1, wtwBikeStep);
+        //변환된 route 반환
+        return route;
+      }
+    } catch (e) {
+      throw e;
+    }
   }
 
   async findSejongBikePaths(

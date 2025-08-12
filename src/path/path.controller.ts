@@ -11,11 +11,7 @@ import {
 import { PathService } from './path.service';
 import { CreatePathDto } from './dto/create-path.dto';
 import { UpdatePathDto } from './dto/update-path.dto';
-import {
-  FilterDuplicatedRouteInput,
-  FilterDuplicatedRouteOutput,
-  PubRoute,
-} from './dto/path.dto';
+import { PubRoute } from './dto/path.dto';
 
 @Controller('path')
 export class PathController {
@@ -51,10 +47,15 @@ export class PathController {
 
   @Post()
   async filterDuplicatedRoute(
-    @Body() filterDuplicatedRouteInput: FilterDuplicatedRouteInput,
-  ): Promise<FilterDuplicatedRouteOutput> {
+    @Body() filterDuplicatedRouteInput: PubRoute[],
+  ): Promise<PubRoute[]> {
     return await this.pathService.filterDuplicatedRoute(
       filterDuplicatedRouteInput,
     );
+  }
+
+  @Post('convert')
+  async convertRoute(@Body() body) {
+    return await this.pathService.convertMybikeRoute(body);
   }
 }
