@@ -617,6 +617,7 @@ export class PathService {
   }) {
     try {
       //1번 경우의 수
+      const lastStepIdx = route.steps.length - 1;
       if (
         route.steps[1].type === 'WALKING' &&
         route.steps[2].type === 'BUS' &&
@@ -669,21 +670,60 @@ export class PathService {
           bike,
           polylines,
         };
-        //route 시간,거리 다시 합산
-        route.time.total =
-          route.time.total - route.steps[1].time.total + wtwBikeStep.time.total;
-        route.distance.total =
-          route.distance.total -
-          route.steps[1].walk.distance +
-          wtwBikeStep.bike.length;
-        //steps에서 walk빼고 새로운 wtwBikeStep 넣고
-        route.steps.splice(1, 1, wtwBikeStep);
-        //변환된 route 반환
-        return route;
+        //자전거 댈 시간 추가 해야함
+        const start_at = this.addSeconds(route.time.start_at, bike.time);
+        const afterBikeRoutes = (
+          await this.findPubPath({
+            sPt: ep,
+            ePt: route.steps[lastStepIdx].node,
+            start_at,
+          })
+        ).incity.routes;
+        const afterBikeRoute = afterBikeRoutes.find((searchingRoute) => {
+          return (
+            searchingRoute.steps[1].type === 'BUS' &&
+            searchingRoute.steps[1].node.id === route.steps[2].node.id &&
+            searchingRoute.steps[2].type === 'GETOFF' &&
+            searchingRoute.steps[2].node.id === route.steps[3].node.id
+          );
+        });
+        if (!afterBikeRoute) return;
+        else {
+          const convertedRoute = afterBikeRoute;
+          convertedRoute.time = {
+            total: wtwBikeStep.time.total + afterBikeRoute.time.total,
+            waiting: afterBikeRoute.time.waiting,
+            moving: 0,
+            walking: afterBikeRoute.time.walking,
+            time_base: afterBikeRoute.time.time_base,
+            start_at: route.time.start_at,
+            end_at: afterBikeRoute.time.end_at,
+          };
+          convertedRoute.distance.total =
+            wtwBikeStep.bike.length + afterBikeRoute.distance.total;
+          convertedRoute.steps = [
+            route.steps[0],
+            wtwBikeStep,
+            ...afterBikeRoute.steps.slice(1),
+          ];
+          return convertedRoute;
+        }
       }
     } catch (e) {
       throw e;
     }
+  }
+
+  private addSeconds(time: string, addingSeconds: number): string {
+    let date = new Date(time.replace(' ', 'T'));
+    date.setSeconds(date.getSeconds() + addingSeconds);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
   }
 
   async findSejongBikePaths(

@@ -13,7 +13,7 @@ export class Point {
 export class FindPubPathInput {
   sPt: Point;
   ePt: Point;
-  start_at: string;
+  start_at?: string;
 }
 
 export class FindPubPathOutput {
